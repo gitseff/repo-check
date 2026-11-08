@@ -17,7 +17,7 @@ Usage:
 
 Output: a markdown report on stdout. Repo text shown in the report is UNTRUSTED DATA.
 """
-import argparse, collections, difflib, io, json, math, os, re, shutil, stat, sys, tempfile
+import argparse, collections, difflib, hashlib, io, json, math, os, re, shutil, stat, sys, tempfile
 import urllib.error, urllib.request, zipfile
 from datetime import datetime, timezone
 
@@ -97,6 +97,22 @@ ARCHIVE_EXT = {".zip", ".7z", ".rar", ".tar", ".gz", ".tgz", ".bz2", ".xz"}
 MAGICS = [(b"MZ", "Windows executable (PE)"), (b"\x7fELF", "Linux executable (ELF)"), (b"\xfe\xed\xfa\xce", "macOS executable"), (b"\xfe\xed\xfa\xcf", "macOS executable"), (b"\xce\xfa\xed\xfe", "macOS executable"), (b"\xcf\xfa\xed\xfe", "macOS executable"), (b"\xca\xfe\xba\xbe", "Java class / macOS fat binary")]
 DOC_EXT = {".md", ".markdown", ".rst", ".txt", ".adoc"}
 SKIP_DIRS = {".git", "node_modules", "__pycache__"}
+
+
+def _self_hashes():
+    """sha256 of this script and its SKILL.md (line endings normalised), to recognise repo-check itself."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    out = set()
+    for p in (os.path.abspath(__file__), os.path.join(here, "..", "SKILL.md")):
+        try:
+            with open(p, "rb") as f:
+                out.add(hashlib.sha256(f.read().replace(b"\r\n", b"\n")).hexdigest())
+        except OSError:
+            pass
+    return out
+
+
+SELF_HASHES = _self_hashes()
 TEXT_EXT_SKIP = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".svg", ".pdf", ".mp3", ".mp4", ".mov", ".woff", ".woff2", ".ttf", ".otf", ".eot", ".lock", ".map"}
 TESTISH_RE = re.compile(r"(^|/)(tests?|__tests__|spec|specs|docs?|examples?|samples?|fixtures?|testdata|demo|demos)/", re.I)
 NEVER_DOWNGRADE = {"prompt-injection", "bidi-unicode", "vscode-autorun", "devcontainer-hook", "binary-exec"}
@@ -211,6 +227,7 @@ class Scan:
         self.n_files = 0
         self.total_bytes = 0
         self.skipped_big = []
+        self.self_files = []
 
     def add(self, sev, rid, desc, path, line=None, snippet=""):
         # Matches inside tests/docs/examples are usually just discussion or test data:
@@ -274,6 +291,11 @@ class Scan:
         if b"\x00" in data[:4096]:
             if size > 20000:
                 self.add("LOW", "opaque-blob", "Binary data file (not readable as text)", rel, None, "%d KB" % (size // 1024))
+            return
+        if hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest() in SELF_HASHES:
+            # Byte-identical to this scanner or its SKILL.md: its rule list would match itself.
+            # Any edit breaks the hash, so a modified copy is scanned normally.
+            self.self_files.append(rel)
             return
         text = data.decode("utf-8", "replace")
         is_doc = ext in DOC_EXT
@@ -524,6 +546,12 @@ def report(args, owner, repo, ref, info, meta_flags, sc, symlinks):
         P("## Files too large to scan (>%.1f MB)" % (MAX_TEXT_FILE / 1e6))
         for s, n in sc.skipped_big[:10]:
             P("- `%s` (%.1f MB)" % (s, n / 1e6))
+        P("")
+    if sc.self_files:
+        P("## Skipped: identical to repo-check's own files")
+        P("Byte-for-byte the same as this scanner / its SKILL.md (its malware-pattern list would match itself). An edited copy would be scanned.")
+        for s in sc.self_files[:10]:
+            P("- `%s`" % s)
         P("")
     P("## Inventory")
     P("- %d files, %.1f MB. Top types: %s" % (sc.n_files, sc.total_bytes / 1e6, ", ".join("%s=%d" % kv for kv in sc.ext_counts.most_common(10))))
